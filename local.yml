@@ -19,7 +19,7 @@ services:
       - .env
     ports:
       - '8000:8000'
-    command: /start
+    # command: start
 
   postgres:
     build:
@@ -37,12 +37,12 @@ services:
     image: redis:6
     container_name: redis_bike_index
 
-  worker:
-    <<: *rails
-    image: bike_index_local_worker
-    container_name: worker_bike_index_local
-    depends_on:
-      - redis
-      - postgres
-    ports: []
-    command: /start-worker
+  # worker:
+  #   <<: *rails
+  #   image: bike_index_local_worker
+  #   container_name: worker_bike_index_local
+  #   depends_on:
+  #     - redis
+  #     - postgres
+  #   ports: []
+  #   command: /start-worker
