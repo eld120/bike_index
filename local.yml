@@ -1,0 +1,48 @@
+version: '3'
+
+volumes:
+  bike_index_local_postgres_data: {}
+  bike_index_local_postgres_data_backups: {}
+
+services:
+  rails: &rails
+    build:
+      context: .
+      dockerfile: ./compose/local/rails/Dockerfile
+    image: bike_index_local_rails
+    container_name: bike_index_local_rails
+    depends_on:
+      - postgres
+    volumes:
+      - .:/app:z
+    env_file:
+      - .env
+    ports:
+      - '8000:8000'
+    command: /start
+
+  postgres:
+    build:
+      context: .
+      dockerfile: ./compose/local/postgres/Dockerfile
+    image: bike_index_production_postgres
+    container_name: bike_index_local_postgres
+    volumes:
+      - bike_index_local_postgres_data:/var/lib/postgresql/data
+      - bike_index_local_postgres_data_backups:/backups
+    env_file:
+      - .env
+
+  redis:
+    image: redis:6
+    container_name: redis_bike_index
+
+  worker:
+    <<: *rails
+    image: bike_index_local_worker
+    container_name: worker_bike_index_local
+    depends_on:
+      - redis
+      - postgres
+    ports: []
+    command: /start-worker
