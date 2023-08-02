@@ -90,7 +90,7 @@ module BikeAttributable
   def title_string
     t = [year, mnfg_name, frame_model_truncated].join(" ")
     t += " #{type}" if type != "bike"
-    Rails::Html::FullSanitizer.new.sanitize(t.gsub(/\s+/, " ")).strip
+    ParamsNormalizer.sanitize(t.gsub(/\s+/, " "))
   end
 
   def video_embed_src
@@ -149,13 +149,15 @@ module BikeAttributable
       return stock_photo_url.present? ? stock_photo_url : nil
     end
     image_col = public_images.limit(1).first&.image
-    return nil if image_col.blank?
-    image_url = image_col.send(:url, size)
-    # The image is not present if it's not there - returns false for remote images in dev
-    # Return the image_url if we aren't falling back to remote image urls or if the image is present
-    return image_url if !REMOTE_IMAGE_FALLBACK_URLS || image_col.present?
-    # Create a image_url using the aws path
-    "https://files.bikeindex.org" + image_url.gsub(ENV["BASE_URL"], "")
+    return nil if image_col.blank? && !REMOTE_IMAGE_FALLBACK_URLS
+    image_url = image_col&.send(:url, size)
+    # image_col.blank? and image_url.present? indicates it's a remote file in local development
+    if REMOTE_IMAGE_FALLBACK_URLS && image_col.blank? && image_url.present?
+      # Create a image_url using the aws path
+      "https://files.bikeindex.org" + image_url.gsub(ENV["BASE_URL"], "")
+    else
+      image_url
+    end
   end
 
   protected

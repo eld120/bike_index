@@ -459,12 +459,7 @@ class BParam < ApplicationRecord
   end
 
   def mnfg_name
-    return nil unless manufacturer.present?
-    if manufacturer.other? && bike["manufacturer_other"].present?
-      Rails::Html::FullSanitizer.new.sanitize(bike["manufacturer_other"].to_s)
-    else
-      manufacturer.simple_name
-    end.strip.truncate(60)
+    Manufacturer.calculated_mnfg_name(manufacturer, bike["manufacturer_other"])
   end
 
   def generate_id_token
@@ -480,6 +475,19 @@ class BParam < ApplicationRecord
       user_id: creator_id,
       bike_id: created_bike_id,
       use_entered_address: ParamsNormalizer.boolean(attrs[:use_entered_address]))
+  end
+
+  def partial_notification_pre_tracking?
+    (created_at || Time.current) < EmailPartialRegistrationWorker::NOTIFICATION_STARTED
+  end
+
+  def partial_notification_resends
+    return partial_notifications if partial_notification_pre_tracking?
+    partial_notifications.offset(1)
+  end
+
+  def partial_notifications
+    Notification.partial_registration.where(notifiable: self).order(:id)
   end
 
   # Below here is revised setup
