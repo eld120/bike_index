@@ -1,0 +1,6 @@
+groups:
+  - vscode
+runcmd:
+  - adduser ubuntu vscode
+ssh_authorized_keys:
+  - cat $HOME/.ssh/id_ed25519.pub
