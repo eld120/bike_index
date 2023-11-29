@@ -18,12 +18,24 @@ else{
 }
 
 # check for our vm
-if (multipass info bikeindex ){
-    # multipass shell bikeindex
-    write-output "instance found"
+# redirect output to > NUL
+if ( multipass info bikeindexv2   ){
+    
+   ( write-output "instance found") -and (multipass shell bikeindexv2)
 }
 else{
-    multipass launch focal --name bikeindex --disk 10G --memory 2G --cloud-init ./ops/cloud-init.yml | multipass transfer ./bike_index bikeindex:/home/ubuntu/ --recursive
+    # the following is already set - so should work?
+    # multipass set local.privileged-mounts=true
+    # multipass set local.bridged-network=Wi-Fi
+    # refreshenv 
+    # need to input a 5s sleep
+    # Start-Sleep 5
+    multipass launch focal --name bikeindexv2 --bridged --disk 10G --memory 2G --cloud-init bike_index\seya\ops\cloud-init.yml
+    Start-Sleep 12
+    multipass transfer ./bike_index bikeindexv2:/home/ubuntu/ --recursive  
+    Start-Sleep 12
+    # multipass mount . bikeindex:/home/ubuntu/ --recursive 
+    multipass shell bikeindexv2
 }
 
-multipass shell bikeindex # | ./bike_index/kickstand.sh 
+# multipass shell bikeindex # | ./bike_index/kickstand.sh 

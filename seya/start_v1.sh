@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash 
 
 # sudo usermod root --password ''
 # su root
@@ -19,7 +19,7 @@ echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.co
 
 sudo apt update 
 sudo apt install -y  postgresql imagemagick redis nodejs build-essential dos2unix autoconf patch rustc libssl-dev libyaml-dev libreadline6-dev zlib1g-dev libgmp-dev libncurses5-dev libffi-dev libgdbm6 libgdbm-dev libdb-dev uuid-dev libpq-dev postgresql-contrib
-# sudo snap install ruby --channel=2.7/stable --classic
+sudo snap install ruby --channel=2.7/stable --classic
 sudo npm install --global yarn
 
 
@@ -27,11 +27,13 @@ sudo npm install --global yarn
 sudo systemctl enable postgresql
 
 # fixes windows line endings
-cd bike_index && find ./ -type f -exec dos2unix {} \;
+find ./ -type f -exec dos2unix {} \;
 
+
+# confirmed the base user needs to be created and given superuser priviledges in order to create a db
 
 # sudo -u postgres psql
-# create user ubuntu with password 'L0kBsH5aX1w';
+# create user ubuntu;
 # alter user ubuntu with superuser;
 # create database bikeindex_development
 # \dt
@@ -39,4 +41,4 @@ cd bike_index && find ./ -type f -exec dos2unix {} \;
 # 
 # sudo systemctl restart postgresql.service
 
-bike_index/bin/setup
+/bin/setup
