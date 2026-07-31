@@ -6,7 +6,7 @@
   },
   "deploy": {
     "preDeployCommand": ["./bin/rails db:prepare"],
-    "healthcheckPath": "/",
+    "healthcheckPath": "/up",
     "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 3
