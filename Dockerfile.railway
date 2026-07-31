@@ -1,0 +1,75 @@
+# syntax=docker/dockerfile:1
+
+# Railway-only image for the SSO test environment. The repo's main Dockerfile targets
+# review apps / Kamal and stays untouched; this one drops what Railway doesn't use
+# (BuildKit cache mounts, thrust's unix socket, cron, the db-provisioning entrypoint)
+# and binds Puma straight to $PORT. Migrations run via railway.json's preDeployCommand.
+
+ARG RUBY_VERSION=4.0.5
+FROM docker.io/library/ruby:$RUBY_VERSION-slim AS base
+
+WORKDIR /rails
+
+# - libpq5: pg gem
+# - libvips / imagemagick: ruby-vips + mini_magick
+# - nodejs: execjs runtime; coffee-rails (deprecated, still in the default group)
+#   needs one to load at boot, during precompile and at server start
+# - libjemalloc2: memory savings under load
+RUN apt-get update -qq && \
+    apt-get install --no-install-recommends -y \
+      curl \
+      imagemagick \
+      libjemalloc2 \
+      libpq5 \
+      libvips \
+      libyaml-0-2 \
+      nodejs && \
+    ln -s /usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2 /usr/local/lib/libjemalloc.so && \
+    rm -rf /var/lib/apt/lists /var/cache/apt/archives
+
+# Build in sandbox so precompiled assets and bootsnap caches match runtime.
+ENV RAILS_ENV="sandbox" \
+    BUNDLE_DEPLOYMENT="1" \
+    BUNDLE_PATH="/usr/local/bundle" \
+    BUNDLE_WITHOUT="development:test" \
+    LD_PRELOAD="/usr/local/lib/libjemalloc.so"
+
+FROM base AS build
+
+RUN apt-get update -qq && \
+    apt-get install --no-install-recommends -y \
+      build-essential \
+      git \
+      libpq-dev \
+      libvips-dev \
+      libyaml-dev \
+      pkg-config && \
+    rm -rf /var/lib/apt/lists /var/cache/apt/archives
+
+COPY Gemfile Gemfile.lock ./
+RUN bundle install && \
+    rm -rf ~/.bundle/ "${BUNDLE_PATH}"/ruby/*/cache "${BUNDLE_PATH}"/ruby/*/bundler/gems/*/.git && \
+    bundle exec bootsnap precompile -j 1 --gemfile
+
+COPY . .
+
+RUN bundle exec bootsnap precompile -j 1 app/ lib/
+
+# No credentials.yml.enc, so a dummy SECRET_KEY_BASE suffices. REDIS_URL is set
+# because some initializers read the Redis config at boot.
+RUN SECRET_KEY_BASE=dummy REDIS_URL="redis://localhost:6379" ./bin/rails assets:precompile
+
+FROM base
+
+RUN groupadd --system --gid 1000 rails && \
+    useradd rails --uid 1000 --gid 1000 --create-home --shell /bin/bash
+
+COPY --chown=rails:rails --from=build "${BUNDLE_PATH}" "${BUNDLE_PATH}"
+COPY --chown=rails:rails --from=build /rails /rails
+
+# letter_opener_web writes its inbox under storage/, CarrierWave under public/uploads.
+RUN mkdir -p /rails/storage /rails/public/uploads && \
+    chown rails:rails /rails/storage /rails/public/uploads
+USER 1000:1000
+
+CMD ["sh", "-c", "bundle exec puma -b tcp://0.0.0.0:${PORT:-8080}"]
