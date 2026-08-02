@@ -173,7 +173,7 @@ RSpec.describe "SAML SSO login", :saml_env, type: :request do
     context "no session cookie on the callback" do
       it "signs in anyway" do
         request_id, relay_state = initiate_login
-        cookies.clear
+        reset! # a fresh browser: no cookie of any kind on the POST
         post "/sso/#{slug}/callback", params: {
           SAMLResponse: signed_saml_response(audience: settings.sp_entity_id,
             recipient: settings.assertion_consumer_service_url, in_response_to: request_id,
@@ -195,7 +195,7 @@ RSpec.describe "SAML SSO login", :saml_env, type: :request do
         post "/sso/#{slug}/callback", params: {SAMLResponse: saml_response, RelayState: relay_state}
         expect(signed_in?).to be true
 
-        cookies.clear
+        reset! # a fresh browser: no cookie of any kind on the POST
         post "/sso/#{slug}/callback", params: {SAMLResponse: saml_response, RelayState: relay_state}
         expect(response).to redirect_to(new_session_path)
         expect(signed_in?).to be false
