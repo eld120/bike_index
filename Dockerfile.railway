@@ -72,4 +72,8 @@ RUN mkdir -p /rails/storage /rails/public/uploads && \
     chown rails:rails /rails/storage /rails/public/uploads
 USER 1000:1000
 
-CMD ["sh", "-c", "bundle exec puma -b tcp://0.0.0.0:${PORT:-8080}"]
+# Sidekiq runs beside Puma rather than as its own Railway service: several admin
+# actions (granting an organization feature, recalculating enabled_feature_slugs)
+# only take effect once their job runs, and letter_opener_web writes its inbox to
+# the local filesystem — a separate worker container would mail into its own copy.
+CMD ["sh", "-c", "bundle exec sidekiq & exec bundle exec puma -b tcp://0.0.0.0:${PORT:-8080}"]
