@@ -1,5 +1,7 @@
+# A browser drops a cookie whose domain isn't the origin host or a parent of it, so a
+# deployment on some other host needs to say so or no session is ever stored.
 domain = if Rails.env.production? || Rails.env.sandbox?
-  "bikeindex.org"
+  ENV["SESSION_COOKIE_DOMAIN"].presence || "bikeindex.org"
 elsif Rails.env.test?
   nil
 else
