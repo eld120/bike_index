@@ -16,11 +16,4 @@ else
   "_bikeindex_session_#{port}"
 end
 
-# The SAML ACS is a cross-site POST from the IdP, and a SameSite=Lax cookie isn't sent on
-# one — so the callback sees no session at all. Left unset everywhere by default; this only
-# exists so the SSO test environment can relax it while the real fix is decided.
-same_site = ENV["SESSION_COOKIE_SAME_SITE"].presence&.to_sym
-
-options = {key:, domain:}
-options[:same_site] = same_site if same_site
-Rails.application.config.session_store :cookie_store, **options
+Rails.application.config.session_store :cookie_store, key:, domain:
