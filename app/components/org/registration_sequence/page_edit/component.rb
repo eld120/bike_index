@@ -10,15 +10,13 @@ module Org
 
         private
 
-        # The page stores its bullets as a single body <ul> of <li>s; split it back into
-        # one editable bullet each, falling back to one empty bullet so a row always shows.
+        # One editable row per bullet, with an empty row so a blank page has somewhere to type
         def bullets
-          html = @form_builder.object.body
-          return [""] if html.blank?
-
-          items = Nokogiri::HTML.fragment(html).css("li")
-          items.any? ? items.map { it.inner_html.strip } : [html.strip]
+          @form_builder.object.bullets.presence || [""]
         end
+
+        # There's no badge to name until the page belongs to a sequence
+        def badge_name = @form_builder.object.registration_sequence&.badge_name
       end
     end
   end

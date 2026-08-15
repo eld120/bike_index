@@ -16,7 +16,10 @@ description: >-
   Ruby must be built from GitHub source (~8–10 min, `cache.ruby-lang.org`
   firewalled); also postgres/redis, tailwind build, Chrome-matching
   ChromeDriver, and a local jsdelivr proxy for `:js, type: :system`
-  specs. Trigger whenever a session runs RSpec/bundle/`bin/lint`, or
+  specs. It's also the one environment where Claude starts `bin/dev`
+  itself rather than asking — nobody else owns that container.
+  Trigger whenever a session runs RSpec/bundle/`bin/lint`, needs a
+  running dev server, or
   the user reports `env: 'ruby': No such file or directory` /
   `Bundler::RubyVersionMismatch` /
   `Could not find 'bundler' (4.0.0.beta2)` /
@@ -33,21 +36,21 @@ sandbox**; `/home/user/bike_index` uses **Claude Code web sandbox**.
 
 ## Local macOS (Conductor workspace)
 
-Ruby 4.0.2 is installed via [mise](https://mise.jdx.dev/), but Claude
+Ruby 4.0.6 is installed via [mise](https://mise.jdx.dev/), but Claude
 Code's shell sometimes spawns subprocesses without the mise shim on
 PATH — bare `ruby` then resolves to `/usr/bin/ruby` (2.6) and `bundle`
 fails with `Could not find 'bundler' (4.0.0.beta2)`. **The Ruby is
 installed; the PATH just isn't right** — don't reinstall, don't edit
 the Gemfile.
 
-Check first; only prefix PATH if `ruby -v` doesn't already print 4.0.2
+Check first; only prefix PATH if `ruby -v` doesn't already print 4.0.6
 (`mise exec -- ruby`/`bundle` are unreliable in this harness — they
 can still resolve to system 2.6, so use the direct prefix):
 
 ```bash
 ruby -v
-# If it's not 4.0.2:
-export PATH="/Users/seth/.local/share/mise/installs/ruby/4.0.2/bin:$PATH"
+# If it's not 4.0.6:
+export PATH="/Users/seth/.local/share/mise/installs/ruby/4.0.6/bin:$PATH"
 ```
 
 Then run specs the normal way:
@@ -111,7 +114,7 @@ Activate mise so its shims put the pinned Ruby and a matching Bundler on PATH
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 eval "$(mise activate bash)"
-ruby --version      # => ruby 4.0.5 ... [x86_64-linux]
+ruby --version      # => ruby 4.0.6 ... [x86_64-linux]
 bundle install      # ~8s once shared-mime-info is present; vendor/bundle + .bundle are gitignored
 ```
 
@@ -120,7 +123,7 @@ drops the mise shim (same harness quirk as Local macOS), prefix the install
 dir directly instead of reactivating (match the version in `mise.toml`):
 
 ```bash
-export PATH="$HOME/.local/share/mise/installs/ruby/4.0.5/bin:$PATH"
+export PATH="$HOME/.local/share/mise/installs/ruby/4.0.6/bin:$PATH"
 ```
 
 ### Database-backed specs
@@ -134,33 +137,46 @@ applies to any spec that renders the layout.
 
 ## Claude Code web sandbox
 
-The Gemfile pins `ruby "4.0.2"` and `Gemfile.lock` pins
-`BUNDLED WITH 4.0.0.beta2`. No prebuilt 4.0.2 binary is reachable
-(`cache.ruby-lang.org` is 403'd, `ruby/ruby-builder`'s toolcache tops
-out at `3.5.0-preview1`), so build from the GitHub source tag — about
-8–10 min on a 4-core sandbox. Don't fall back to 3.x and patch the
-Gemfile; Bundler 4.x's resolver behaves differently and you'll waste
-time chasing fake regressions. Once `/opt/ruby-4.0.2/x64/` exists,
+`Gemfile` pins the Ruby version (`ruby "4.0.6"` at time of writing —
+**read the current pin from the `ruby` line in `Gemfile`**, it moves) and
+`Gemfile.lock` pins `BUNDLED WITH 4.0.15`. No prebuilt binary for that
+version is reachable (`cache.ruby-lang.org` is 403'd, `ruby/ruby-builder`'s
+toolcache tops out at `3.5.0-preview1`), so build from the GitHub source
+tag — about 8–10 min on a 4-core sandbox. Don't fall back to 3.x and patch
+the Gemfile; Bundler 4.x's resolver behaves differently and you'll waste
+time chasing fake regressions. Once `/opt/ruby-<version>/x64/` exists,
 `bundle install` works as-is.
 
-## One-shot Ruby 4.0.2 build
+You also need **libvips** on the box — the app loads `ruby-vips` at boot,
+so without it every Ruby entry point (`db:migrate`, `rspec`, `rails`) dies
+with `LoadError: Could not open library 'vips.so.42'`. It's not a build
+dep, so install it separately: `apt-get install -y libvips42` (run
+`apt-get update` first if a fetch 404s).
 
-Skip if `/opt/ruby-4.0.2/x64/bin/ruby --version` already prints 4.0.2.
-Two quirks the bash block handles: (1) GitHub source tarballs lack a
-pre-generated `configure`, so `autogen.sh` runs first; (2) `make install`
-fetches ~30 bundled gems via `BASERUBY`, whose hardcoded CA bundle
-doesn't include the sandbox egress-proxy CA — so we pre-stage every
-bundled gem with `curl` (which honours
-`/etc/ssl/certs/ca-certificates.crt`) before `make install`.
+## One-shot Ruby build
+
+Set `RUBYVER` to the pin from `Gemfile`. Skip if
+`/opt/ruby-$RUBYVER/x64/bin/ruby --version` already prints it. Three
+quirks the bash block handles: (1) GitHub's archive-tarball endpoint
+(`/archive/refs/tags/*.tar.gz`) **403s through the sandbox proxy** even
+though plain `git` over https to github.com works — so clone the tag
+shallowly instead of `curl`-ing a tarball; (2) the source tree ships no
+pre-generated `configure`, so `autogen.sh` runs first; (3) `make install`
+fetches ~30 bundled gems via `BASERUBY`, whose hardcoded CA bundle doesn't
+include the sandbox egress-proxy CA — so we pre-stage every bundled gem
+with `curl` (which honours `/etc/ssl/certs/ca-certificates.crt`) before
+`make install`.
 
 ```bash
-# 1. Source — GitHub tag tarball (cache.ruby-lang.org is blocked)
-mkdir -p /tmp/ruby-build-src && cd /tmp/ruby-build-src
-curl -sfL "https://github.com/ruby/ruby/archive/refs/tags/v4.0.2.tar.gz" \
-  | tar -xz
-cd ruby-4.0.2
+RUBYVER=$(grep -oE '^ruby "([0-9.]+)"' /home/user/bike_index/Gemfile | grep -oE '[0-9.]+')
 
-# 2. Generate ./configure (GitHub source tarballs don't ship it)
+# 1. Source — shallow git clone of the tag. The archive tarball URL 403s here;
+#    codeload does too. `git clone` over https is what works.
+mkdir -p /tmp/ruby-build-src && cd /tmp/ruby-build-src
+git clone --depth 1 --branch "v${RUBYVER}" https://github.com/ruby/ruby.git "ruby-${RUBYVER}"
+cd "ruby-${RUBYVER}"
+
+# 2. Generate ./configure (the source tree doesn't ship it)
 ./autogen.sh
 
 # 3. Pre-stage every bundled gem (avoids the rubygems-cert MITM issue)
@@ -173,8 +189,8 @@ done < gems/bundled_gems
 
 # 4. Configure + build + install (BASERUBY = preinstalled /opt/ruby-3.3.6)
 mkdir -p /tmp/ruby-build-src/build && cd /tmp/ruby-build-src/build
-/tmp/ruby-build-src/ruby-4.0.2/configure \
-  --prefix=/opt/ruby-4.0.2/x64 \
+"/tmp/ruby-build-src/ruby-${RUBYVER}/configure" \
+  --prefix="/opt/ruby-${RUBYVER}/x64" \
   --enable-shared \
   --disable-install-doc \
   --with-openssl-dir=/usr
@@ -182,12 +198,12 @@ make -j"$(nproc)"
 SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt make install
 
 # 5. Match the GitHub-Actions hostedtoolcache layout some shebangs assume
-mkdir -p /opt/hostedtoolcache/Ruby/4.0.2
-[ -e /opt/hostedtoolcache/Ruby/4.0.2/x64 ] || \
-  ln -s /opt/ruby-4.0.2/x64 /opt/hostedtoolcache/Ruby/4.0.2/x64
+mkdir -p "/opt/hostedtoolcache/Ruby/${RUBYVER}"
+[ -e "/opt/hostedtoolcache/Ruby/${RUBYVER}/x64" ] || \
+  ln -s "/opt/ruby-${RUBYVER}/x64" "/opt/hostedtoolcache/Ruby/${RUBYVER}/x64"
 
 cd /home/user/bike_index
-/opt/ruby-4.0.2/x64/bin/ruby --version   # => ruby 4.0.2 ... [x86_64-linux]
+"/opt/ruby-${RUBYVER}/x64/bin/ruby" --version   # => ruby $RUBYVER ... [x86_64-linux]
 ```
 
 ## Toolchain on PATH
@@ -198,8 +214,8 @@ lives only on `/usr/sbin`.
 
 ```bash
 CHROME_DIR=$(ls -d /opt/pw-browsers/chromium-*/chrome-linux | sort -V | tail -1)
-export PATH="/opt/ruby-4.0.2/x64/bin:$CHROME_DIR:/usr/local/bin:/usr/bin:/bin:/usr/sbin"
-export LD_LIBRARY_PATH="/opt/ruby-4.0.2/x64/lib:$LD_LIBRARY_PATH"
+export PATH="/opt/ruby-4.0.6/x64/bin:$CHROME_DIR:/usr/local/bin:/usr/bin:/bin:/usr/sbin"
+export LD_LIBRARY_PATH="/opt/ruby-4.0.6/x64/lib:$LD_LIBRARY_PATH"
 bundle install
 ```
 
@@ -239,6 +255,97 @@ bundle exec rails tailwindcss:build
 
 (See the `integration-testing` skill — same rule applies to
 layout-rendering request specs, not just system specs.)
+
+## Starting the dev server — web sandbox (C) only
+
+`CLAUDE.md` says to stop and ask the user to start `bin/dev`. That rule is about
+*their* machine, where the server is a process they own and may already have
+running. **In the web sandbox there is nobody to ask** — the container is yours,
+it's ephemeral, and nothing else is on the port — so start it yourself when a
+task needs a running app (screenshots, checking a page actually renders). In
+**A (local macOS Conductor workspace)** and **B (Conductor cloud sandbox)** the
+rule stands: a human owns that machine, so ask.
+
+Two things beyond Toolchain + Services above. Development databases, which the
+test setup doesn't create — and which don't take `database.yml`'s `CI=1` branch,
+so the credentials have to be passed as `PG*`. And a UTF-8 locale: foreman reads
+`.env` in the process's external encoding, and an unset locale makes that
+US-ASCII, which dies on the file's non-ASCII bytes with `invalid byte sequence
+in US-ASCII`.
+
+```bash
+export PGHOST=127.0.0.1 PGUSER=rails PGPASSWORD=password
+export LANG=C.UTF-8 LC_ALL=C.UTF-8
+eval "$(ruby bin/env --export)"
+bundle exec rails db:create db:migrate   # bikeindex_development + its analytics database
+bin/dev                                  # run it in the background - it doesn't return
+```
+
+Then wait for it rather than assuming — the first boot compiles assets:
+
+```bash
+until curl -fs -o /dev/null "$BASE_URL/"; do sleep 5; done
+```
+
+`bin/dev` runs foreman, so the tailwind and dartsass watchers come with it and a
+page you screenshot is styled. It starts its own redis, which exits harmlessly
+when one is already listening. Postgres and redis don't survive a container idle
+period: a server answering `PG::ConnectionBad` wants `service postgresql start`
+and a restart, not debugging.
+
+A fresh development database is **empty**, and the app doesn't say so — it renders
+a combobox with no matches rather than an error. `bundle exec rails db:seed` needs
+`setup:import_spreadsheets` (network), so for a single flow seed only what it asks
+for, via `rails runner`: the reference data from the relevant `db/seeds/seed_*.rb`
+(`seed_bike_associations` covers colors), a `Manufacturer` or two — and then
+`Autocomplete::Loader.load_all(%w[Manufacturer])`, without which the manufacturer
+combobox stays empty however many rows exist, because it reads Redis rather than
+the database.
+
+## Driving the app with Playwright MCP (web sandbox)
+
+The MCP server is a different browser from the one `spec/support/local_chrome.rb`
+configures, and it comes up unconfigured. Three one-time fixes, each of which fails
+with a message that names the missing path:
+
+```bash
+# 1. It looks for the `chrome` channel at a fixed path
+mkdir -p /opt/google/chrome
+ln -sfn "$(ls -d /opt/pw-browsers/chromium-*/chrome-linux | sort -V | tail -1)/chrome" /opt/google/chrome/chrome
+
+# 2. The npm playwright pin wants a newer browser build than the image ships. Point the
+#    expected build number at the one that's there (NNNN from the error, MMMM from `ls`)
+ln -sfn /opt/pw-browsers/chromium-MMMM /opt/pw-browsers/chromium-NNNN
+mkdir -p /opt/pw-browsers/chromium_headless_shell-NNNN
+ln -sfn /opt/pw-browsers/chromium_headless_shell-MMMM/chrome-linux \
+        /opt/pw-browsers/chromium_headless_shell-NNNN/chrome-headless-shell-linux64
+ln -sfn headless_shell /opt/pw-browsers/chromium_headless_shell-MMMM/chrome-linux/chrome-headless-shell
+
+# 3. It reads a storage-state file that doesn't exist yet
+mkdir -p /root/.cache/ms-playwright
+printf '{"cookies":[],"origins":[]}' > /root/.cache/ms-playwright/mcp-auth.json
+```
+
+This browser gets no `--host-resolver-rules`, so the jsdelivr pins (jquery, select2,
+honeybadger) fail to load and every page logs `ERR_TUNNEL_CONNECTION_FAILED` for them,
+plus Google Fonts / GTM / Facebook. **Those console errors are the sandbox, not the
+app** — read past them and treat an app-origin error as the signal.
+
+Two selector notes for driving pages here: a local `UI::Forms::Combobox` keeps all its
+options in the DOM and hides the non-matching ones, so `.hw-combobox__option` `.first()`
+resolves to a hidden option and the click times out — use
+`.hw-combobox__option:not([hidden])` or match by text. And `mcp__playwright__browser_click`
+waits for the page to settle before returning, so it can't measure a state that resolves
+in under a second or two; sample from inside one `browser_evaluate` instead.
+
+## No `gh` in the web sandbox
+
+The GitHub CLI isn't installed. Anything the `pr` skill (or any other) expresses as
+`gh pr …` goes through the GitHub MCP tools instead — `mcp__github__list_pull_requests`
+(filter with `head: "<owner>:<branch>"`), `create_pull_request`, `update_pull_request`,
+`pull_request_read`. Check for an existing PR before creating one: a push to a branch can
+open a PR by itself, so the branch may already have one whose body wants updating rather
+than a second PR.
 
 ## Running plain specs
 
@@ -320,13 +427,15 @@ trusts the self-signed cert.
 
 ## End-to-end recap
 
-Assumes Ruby 4.0.2 is already built. Combines the steps above:
+Assumes the pinned Ruby is already built (paths below use 4.0.6 — swap for
+the current pin). Combines the steps above:
 
 ```bash
 CHROME_DIR=$(ls -d /opt/pw-browsers/chromium-*/chrome-linux | sort -V | tail -1)
-export PATH="/opt/ruby-4.0.2/x64/bin:$CHROME_DIR:/usr/local/bin:/usr/bin:/bin:/usr/sbin"
-export LD_LIBRARY_PATH="/opt/ruby-4.0.2/x64/lib:$LD_LIBRARY_PATH"
+export PATH="/opt/ruby-4.0.6/x64/bin:$CHROME_DIR:/usr/local/bin:/usr/bin:/bin:/usr/sbin"
+export LD_LIBRARY_PATH="/opt/ruby-4.0.6/x64/lib:$LD_LIBRARY_PATH"
 service postgresql start && service redis-server start
+apt-get install -y libvips42   # ruby-vips loads at boot; without it every rails/rspec run dies
 cd /home/user/bike_index
 bundle install
 eval "$(ruby bin/env --export)"
@@ -342,10 +451,13 @@ LOCAL_CHROME_OVERRIDE=1 bundle exec rspec spec/integration   # system; CDN proxy
 
 Quick probe: `curl -sIL --max-time 5 "https://<host>" -o /dev/null -w "%{http_code}\n"`.
 
-- **Allowed**: github.com, codeload.github.com, rubygems.org,
+- **Allowed**: github.com (git-over-https clone/fetch), rubygems.org,
   registry.npmjs.org, storage.googleapis.com, files.pythonhosted.org.
 - **Blocked**: cache.ruby-lang.org, cdn.jsdelivr.net, most generic CDNs,
-  download.ruby-lang.org, api.github.com.
+  download.ruby-lang.org, api.github.com. Also GitHub's codeload /
+  archive-tarball endpoints (`/archive/refs/tags/*.tar.gz`,
+  `codeload.github.com`) 403 through the proxy — `git clone` the tag
+  instead of downloading a tarball.
 
 If a tool's default download URL is blocked, look for a GitHub or
 npm-registry alternative before giving up.

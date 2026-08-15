@@ -35,6 +35,20 @@ RSpec.describe SessionsController, type: :request do
       end
     end
 
+    context "passwordless user" do
+      let!(:user) { FactoryBot.create(:user_confirmed, email: "person@example.com", passwordless_user: true) }
+      it "emails a sign in link rather than asking for a password" do
+        ActionMailer::Base.deliveries = []
+        Sidekiq::Testing.inline! do
+          post "/session/identify", params: {session: {email: "person@example.com", remember_me: "1"}}
+        end
+        expect(response).to redirect_to(magic_link_sent_session_path)
+        expect(session[:magic_link_remember_me]).to be_truthy
+        expect(user.reload.magic_link_token).to be_present
+        expect(ActionMailer::Base.deliveries.last.subject).to eq("Sign in to Bike Index")
+      end
+    end
+
     context "no account" do
       it "redirects to sign up with the email pre-filled" do
         identify("newperson@example.com")
@@ -129,6 +143,9 @@ RSpec.describe SessionsController, type: :request do
         expect(mail.to).to eq([current_user.email])
         expect(current_user.reload.magic_link_token).not_to be_nil
       end
+      expect(response).to redirect_to(magic_link_sent_session_path)
+      follow_redirect!
+      expect(response.body).to match("We sent you a magic sign in link")
     end
     context "unknown email" do
       it "redirects to login" do
@@ -144,17 +161,17 @@ RSpec.describe SessionsController, type: :request do
     end
     context "passwordless email" do
       let!(:current_organization) { FactoryBot.create(:organization_with_organization_features, enabled_feature_slugs: ["passwordless_users"], user_email_domain: "party.edu", available_invitation_count: 1) }
-      it "autogenerates" do
+      it "autogenerates the user without granting a role" do
         ActionMailer::Base.deliveries = []
         Sidekiq::Job.clear_all
         Sidekiq::Testing.inline! do
           # Just throw this in here because we don't have anywhere else that tests signup with user_email_domain present...
           expect { post "/session/create_magic_link", params: {email: "somethingcool@ party.edu"} }.to_not change(User, :count)
-          expect(current_organization.organization_roles.count).to eq 0
           expect {
             post "/session/create_magic_link", params: {email: "somethingcool@party.edu"}
           }.to change(User, :count).by 1
-          expect(current_organization.organization_roles.count).to eq 1
+          # Claiming the domain for sign in doesn't grant a role in the organization
+          expect(current_organization.organization_roles.count).to eq 0
           expect(ActionMailer::Base.deliveries.count).to eq 1
           mail = ActionMailer::Base.deliveries.last
           expect(mail.subject).to eq("Sign in to Bike Index")
@@ -163,11 +180,29 @@ RSpec.describe SessionsController, type: :request do
           expect(user.confirmed?).to be_truthy
           expect(user.email).to eq "somethingcool@party.edu"
           expect(user.magic_link_token).to be_present
-          organization_role = user.organization_roles.first
+        end
+      end
+
+      context "also granting a role for the domain" do
+        let!(:current_organization) do
+          FactoryBot.create(:organization_with_organization_features,
+            enabled_feature_slugs: ["passwordless_users", "user_role_for_user_email_domain"],
+            user_email_domain: "party.edu", available_invitation_count: 1)
+        end
+        it "grants the member role" do
+          ActionMailer::Base.deliveries = []
+          Sidekiq::Job.clear_all
+          Sidekiq::Testing.inline! do
+            expect {
+              post "/session/create_magic_link", params: {email: "somethingcool@party.edu"}
+            }.to change(User, :count).by 1
+          end
+          organization_role = User.last.organization_roles.first
           expect(organization_role.organization).to eq current_organization
-          expect(organization_role.created_by_magic_link).to be_truthy
           expect(organization_role.sender_id).to be_blank
           expect(organization_role.role).to eq "member"
+          # Granting the role must not add a second email on top of the sign in link
+          expect(ActionMailer::Base.deliveries.map(&:subject)).to eq(["Sign in to Bike Index"])
         end
       end
     end
@@ -202,6 +237,44 @@ RSpec.describe SessionsController, type: :request do
     end
   end
 
+  describe "magic_link" do
+    let!(:user) { FactoryBot.create(:user_confirmed) }
+
+    # The emailed link is a GET, so it only renders the form that signs in
+    it "renders the interstitial without spending the token" do
+      token = user.refreshed_magic_link_token
+      get "/session/magic_link", params: {token:}
+      expect(response).to render_template(:magic_link)
+      expect(user.reload.magic_link_token).to be_present
+      expect(Capybara.string(response.body))
+        .to have_css("form[action='/session/sign_in_with_magic_link'] input[name='token'][value='#{token}']", visible: :hidden)
+    end
+
+    # A dead token matches no user whatever killed it, so the reason comes from its timestamp
+    context "incorrect_token" do
+      def failure_for(token)
+        get "/session/magic_link", params: {incorrect_token: token}
+        expect(response).to render_template(:magic_link)
+        response.body
+      end
+
+      it "names the timeout for a token older than the window" do
+        stale = SecurityTokenizer.new_token((User::AUTH_TOKEN_EXPIRY + 1.minute).ago)
+        expect(failure_for(stale)).to match(/link has expired/i)
+      end
+
+      it "says it was already used for a token inside the window" do
+        expect(failure_for(SecurityTokenizer.new_token)).to match(/already been used/i)
+      end
+
+      it "stays generic for a token it can't read" do
+        body = failure_for("mangled-by-some-email-client")
+        expect(body).to match(/unable to authenticate/i)
+        expect(body).to_not match(/already been used|link has expired/i)
+      end
+    end
+  end
+
   describe "sign_in_with_magic_link" do
     let!(:superadmin) { FactoryBot.create(:superuser) }
 
@@ -212,11 +285,81 @@ RSpec.describe SessionsController, type: :request do
       expect(superadmin.last_login_at).to be_within(1.second).of Time.current
     end
 
+    # find_by with a blank token matches IS NULL - nearly every user
+    it "signs nobody in for a blank or missing token" do
+      [{token: ""}, {}].each do |params|
+        post "/session/sign_in_with_magic_link", params: params
+        expect(response).to redirect_to magic_link_session_path(incorrect_token: params[:token])
+        expect(response.cookies["auth"]).to be_blank
+      end
+    end
+
+    # The biggest bucket of real failures: the link worked, and then got clicked again
+    it "tells a spent token it was already used, not that something went wrong" do
+      user = FactoryBot.create(:user_confirmed)
+      token = user.refreshed_magic_link_token
+      post "/session/sign_in_with_magic_link", params: {token:}
+      expect(user.reload.magic_link_token).to be_nil
+      delete "/session"
+
+      post "/session/sign_in_with_magic_link", params: {token:}
+      expect(response).to redirect_to magic_link_session_path(incorrect_token: token)
+      follow_redirect!
+      expect(response.body).to match(/already been used/i)
+    end
+
     it "redirects back to return_to when passed (review-app banner)" do
       post "/session/sign_in_with_magic_link",
         params: {token: superadmin.refreshed_magic_link_token, return_to: "/bikes/12"}
       expect(response).to redirect_to "/bikes/12"
       expect(superadmin.reload.magic_link_token).to be_nil
+    end
+
+    context "passwordless user" do
+      let(:user) { FactoryBot.create(:user_confirmed, passwordless_user: true) }
+
+      it "offers to set a password" do
+        post "/session/sign_in_with_magic_link", params: {token: user.refreshed_magic_link_token}
+        expect(response).to redirect_to my_account_url
+        expect(flash[:notice]).to eq({translation_key: :signed_in, url: update_password_form_with_reset_token_users_path})
+        follow_redirect!
+        expect(Capybara.string(response.body))
+          .to have_link("set a password to sign in", href: update_password_form_with_reset_token_users_path)
+      end
+
+      context "organization passwordless user" do
+        let(:organization) { FactoryBot.create(:organization_with_organization_features, enabled_feature_slugs: ["passwordless_users"], user_email_domain: "party.edu") }
+        let!(:organization_role) { FactoryBot.create(:organization_role_claimed, organization:, user:) }
+
+        it "doesn't offer to set a password" do
+          post "/session/sign_in_with_magic_link", params: {token: user.refreshed_magic_link_token}
+          expect(flash[:success]).to eq "You're signed in"
+          expect(flash[:notice]).to be_blank
+        end
+      end
+    end
+  end
+
+  describe "posting with a null origin" do
+    include_context :test_csrf_token
+    let!(:user) { FactoryBot.create(:user_confirmed) }
+
+    # Privacy extensions and VPNs strip the Origin header, which Rails rejects outright.
+    # Losing the session that failed the check is exactly when the form is worth keeping
+    it "hands identify back the email it was given" do
+      post "/session/identify", params: {session: {email: user.email}}, headers: {"HTTP_ORIGIN" => "null"}
+      expect(response).to render_template(:new)
+      expect(response.body).to match(user.email)
+      expect(flash[:error]).to match(/try again.*a VPN/i)
+    end
+
+    it "hands the magic link back its token, unspent" do
+      token = user.refreshed_magic_link_token
+      post "/session/sign_in_with_magic_link", params: {token:}, headers: {"HTTP_ORIGIN" => "null"}
+      expect(response).to render_template(:magic_link)
+      expect(user.reload.magic_link_token).to eq token
+      expect(Capybara.string(response.body))
+        .to have_css("form[action='/session/sign_in_with_magic_link'] input[name='token'][value='#{token}']", visible: :hidden)
     end
   end
 

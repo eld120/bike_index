@@ -2,7 +2,12 @@ class UsersController < ApplicationController
   include Sessionable
 
   before_action :skip_if_signed_in, only: %i[new]
+  # An SSO org owns its domain's accounts, so signing up is the IdP's job too — otherwise
+  # the sign-in guard is bypassed by whatever link or bookmark lands on the signup form.
+  before_action :redirect_forced_saml, only: %i[new create]
   before_action :find_user_from_token_for_password_reset!, only: %i[update_password_form_with_reset_token update_password_with_reset_token]
+  # RFC 8058 one-click POSTs arrive from the mail provider's servers, with no session or token
+  skip_before_action :verify_authenticity_token, only: %i[unsubscribe_update]
 
   def new
     @user ||= User.new(email: params[:email])
@@ -10,7 +15,8 @@ class UsersController < ApplicationController
   end
 
   def create
-    @user = User.new(permitted_parameters)
+    # The sign up form doesn't collect a password - they sign in with emailed links
+    @user = User.new(permitted_parameters.merge(passwordless_user: true))
     # Set the user's preferred locale if they have a locale we recognize
     if requested_locale != I18n.default_locale
       @user.preferred_language = requested_locale
@@ -28,7 +34,7 @@ class UsersController < ApplicationController
     return super unless action_name == "create"
 
     @user = User.new(email: params.dig(:user, :email))
-    flash.now[:error] = translation(:invalid_authenticity_token, scope: [:controllers, :application, :handle_unverified_request])
+    flash.now[:error] = invalid_authenticity_token_message
     render_partner_or_default_signin_layout(render_action: :new)
   end
 
@@ -54,7 +60,11 @@ class UsersController < ApplicationController
     redirect_to please_confirm_email_users_path
   end
 
+  # Confirming signs the user in, so the emailed GET only renders a form that posts here —
+  # a scanner or prefetcher following the link doesn't spend the confirmation token
   def confirm
+    return render_partner_or_default_signin_layout(render_action: :confirm_interstitial) unless request.post?
+
     @user = User.find(params[:id])
     if @user.confirmed?
       flash[:success] = translation(:already_confirmed)
@@ -67,7 +77,7 @@ class UsersController < ApplicationController
         render_partner_or_default_signin_layout(redirect_path: new_session_path)
       end
     elsif @user.confirm(params[:code])
-      sign_in_and_redirect(@user)
+      sign_in_and_redirect(@user, signed_up: true)
     else
       render :confirm_error_bad_token
     end
@@ -92,7 +102,7 @@ class UsersController < ApplicationController
   end
 
   def update_password_with_reset_token
-    if @user.present? && @user.update(permitted_password_reset_parameters)
+    if @user.present? && @user.update(permitted_password_reset_parameters.merge(passwordless_user: false))
       flash[:success] = translation(:password_reset_successfully)
       # They got the password reset email, which counts as confirming their email
       @user.confirm(@user.confirmation_token) if @user.unconfirmed?
@@ -136,7 +146,7 @@ class UsersController < ApplicationController
           flash[:success] = translation(:you_can_use_bike_index)
           redirect_to(my_account_url) && return
         else
-          flash[:notice] = translation(:accept_tos)
+          flash[:error] = translation(:accept_tos)
           redirect_to(accept_terms_url) && return
         end
       elsif params.dig(:user, :vendor_terms_of_service).present?
@@ -153,7 +163,7 @@ class UsersController < ApplicationController
         end
       end
     end
-    flash[:error] = @user.errors.full_messages if @user&.errors&.full_messages.present?
+    flash[:error] = @user.errors.full_messages.to_sentence if @user&.errors&.full_messages.present?
     redirect_back(fallback_location: user_root_url)
   end
 
@@ -182,9 +192,13 @@ class UsersController < ApplicationController
     end
   end
 
+  # Forgery protection is skipped here, so the signed id is the only credential - trusting the
+  # session would let any page unsubscribe whoever visits it, without a click behind it
   def unsubscribe_update
-    user = current_user || User.find_signed(params[:id], purpose: :unsubscribe)
-    user.update_attribute :notification_newsletters, false if user.present?
+    User.find_signed(params[:id], purpose: :unsubscribe)&.update_attribute(:notification_newsletters, false)
+    # One-click clients read the status and nothing else
+    return head(:ok) if params["List-Unsubscribe"] == "One-Click"
+
     flash[:success] = translation(:successfully_unsubscribed)
     redirect_to(user_root_url) && return
   end
@@ -194,7 +208,7 @@ class UsersController < ApplicationController
   def permitted_parameters
     params.require(:user)
       .permit(:name, :email, :notification_newsletters, :notification_unstolen, :terms_of_service,
-        :password, :password_confirmation, :preferred_language, :additional)
+        :preferred_language, :additional)
       .merge(sign_in_partner.present? ? {partner_data: {sign_up: sign_in_partner}} : {})
   end
 
@@ -202,9 +216,12 @@ class UsersController < ApplicationController
     params.require(:user).permit(:password, :password_confirmation)
   end
 
+  # Signed in users (e.g. passwordless users setting their first password) don't need the emailed token
   def find_user_from_token_for_password_reset!
-    @token = params[:token]
-    @user = User.find_by_token_for_password_reset(@token) if @token.present?
+    @token = params[:token].presence
+    return @user = current_user if @token.blank? && current_user.present?
+
+    @user = User.find_for_auth_token("token_for_password_reset", @token)
     return true if @user.present? && !@user.auth_token_expired?("token_for_password_reset")
 
     remove_session

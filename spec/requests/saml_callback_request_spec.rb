@@ -102,12 +102,54 @@ RSpec.describe "SAML SSO login", :saml_env, type: :request do
         end
       end
 
+      # The only thing that matters for an IdP that mandates encryption: we can actually
+      # decrypt what it sends, and the signature inside still verifies afterwards.
+      context "encrypted assertion" do
+        it "decrypts with the SP private key and signs in" do
+          expect { post_callback(encrypt: true) }.to change(User, :count).by(1)
+          expect(SsoIdentity.last.email).to eq email
+          expect(signed_in?).to be true
+        end
+
+        context "no SP private key provisioned" do
+          let(:sp_key) { "" }
+          it "is rejected rather than raising" do
+            expect { post_callback(encrypt: true) }.not_to change(User, :count)
+            expect(response).to redirect_to(new_session_path)
+            expect(signed_in?).to be false
+          end
+        end
+      end
+
+      # No resolution path may reach a user: not provisioning, not linking, not a returning identity
       context "asserted email domain not in the org" do
         let(:email) { "outsider@gmail.com" }
         it "does not provision or sign in" do
           expect { post_callback }.not_to change(User, :count)
           expect(response).to redirect_to(new_session_path)
           expect(signed_in?).to be false
+        end
+
+        context "an account already exists for the asserted email" do
+          let!(:existing) { FactoryBot.create(:user_confirmed, email:) }
+          it "does not link or sign in" do
+            expect { post_callback }.not_to change(SsoIdentity, :count)
+            expect(response).to redirect_to(new_session_path)
+            expect(signed_in?).to be false
+          end
+        end
+
+        context "an identity already links the asserted NameID" do
+          let(:name_id) { "stable-idp-uid" }
+          let!(:identity) do
+            FactoryBot.create(:sso_identity, organization:, provider: "saml", uid: name_id,
+              user: FactoryBot.create(:user_confirmed, email:))
+          end
+          it "does not sign in" do
+            post_callback(name_id:)
+            expect(response).to redirect_to(new_session_path)
+            expect(signed_in?).to be false
+          end
         end
       end
     end
@@ -128,6 +170,12 @@ RSpec.describe "SAML SSO login", :saml_env, type: :request do
 
       context "tampered signature" do
         let(:forge) { {tamper: true} }
+        include_examples "rejected"
+      end
+
+      # Decrypting must not become a way past signature validation
+      context "tampered signature inside an encrypted assertion" do
+        let(:forge) { {tamper: true, encrypt: true} }
         include_examples "rejected"
       end
 

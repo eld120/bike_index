@@ -606,6 +606,35 @@ RSpec.describe BParam, type: :model do
     end
   end
 
+  describe "self_made?" do
+    let(:b_param) { BParam.new(params: {bike: {owner_email: "owner@example.com"}}.as_json) }
+    let(:user) { FactoryBot.create(:user_confirmed, email: "owner@example.com") }
+
+    it "is only the registrant's own addresses" do
+      expect(b_param.self_made?(nil)).to be_falsey
+      expect(b_param.self_made?(user)).to be_truthy
+
+      # An additional address is theirs once it's confirmed, and not before
+      user.additional_emails = "second@example.com"
+      b_param.owner_email = " SECOND@example.com"
+      expect(b_param.self_made?(user)).to be_falsey
+      user_email = user.user_emails.find_by(email: "second@example.com")
+      user_email.confirm(user_email.confirmation_token)
+      expect(b_param.self_made?(user)).to be_truthy
+
+      b_param.owner_email = "someone@example.com"
+      expect(b_param.self_made?(user)).to be_falsey
+    end
+
+    context "without a user passed" do
+      it "answers for the creator" do
+        expect(b_param.self_made?).to be_falsey
+        b_param.creator = user
+        expect(b_param.self_made?).to be_truthy
+      end
+    end
+  end
+
   describe "status_hash_from_params" do
     let(:params) { ActionController::Parameters.new(params_hash) }
     def acparams(hash)
@@ -835,6 +864,150 @@ RSpec.describe BParam, type: :model do
         result = b_param.safe_bike_attrs({})
         expect(result).to match_hash_indifferently target.merge(cycle_type: "tandem", propulsion_type_slug: "foot-pedal")
         expect(result.keys).to include "propulsion_type_slug"
+      end
+    end
+  end
+
+  describe "unfinished_registration?" do
+    let(:b_param) { FactoryBot.create(:b_param, creator:, origin: "register_flow", params: {bike: bike_params}) }
+    let(:creator) { FactoryBot.create(:user_confirmed) }
+    let(:bike_params) { {manufacturer_id: 1} }
+
+    it "is unfinished, and alerts the creator" do
+      expect(b_param.unfinished_registration?).to be_truthy
+      expect(creator.reload.alert_slugs).to eq ["unfinished_registration"]
+      expect(creator.user_alerts.active.unfinished_registration.map(&:alertable)).to eq [b_param]
+    end
+
+    context "once the bike is created" do
+      it "resolves the alert" do
+        expect(b_param.unfinished_registration?).to be_truthy
+        expect(creator.reload.alert_slugs).to eq ["unfinished_registration"]
+
+        b_param.update(created_bike_id: FactoryBot.create(:bike).id)
+
+        expect(b_param.unfinished_registration?).to be_falsey
+        expect(creator.reload.alert_slugs).to eq []
+      end
+    end
+
+    # Email::PartialRegistrationJob destroys them for banned email domains
+    context "destroyed" do
+      it "doesn't alert about a registration that's gone" do
+        expect(b_param.unfinished_registration?).to be_truthy
+        expect(creator.reload.alert_slugs).to eq ["unfinished_registration"]
+
+        b_param.destroy
+
+        expect(creator.reload.user_alerts.active.pluck(:kind)).to eq []
+        expect(creator.reload.alert_slugs).to eq []
+      end
+    end
+
+    context "without a manufacturer" do
+      let(:bike_params) { {owner_email: "stuff@example.com"} }
+
+      it "is not unfinished, and doesn't alert" do
+        expect(b_param.unfinished_registration?).to be_falsey
+        expect(creator.reload.alert_slugs).to eq []
+      end
+    end
+
+    context "with another origin" do
+      let(:b_param) { FactoryBot.create(:b_param, creator:, origin: "api_v2", params: {bike: bike_params}) }
+
+      it "is not unfinished, and doesn't alert" do
+        expect(b_param.unfinished_registration?).to be_falsey
+        expect(creator.reload.alert_slugs).to eq []
+      end
+    end
+
+    context "without a creator" do
+      let(:creator) { nil }
+
+      it "is unfinished, with nobody to alert" do
+        expect(b_param.unfinished_registration?).to be_truthy
+        expect(UserAlert.count).to eq 0
+      end
+    end
+
+    # Past the window the token stops resuming it, so the alert's own link is dead
+    context "older than the token expiration" do
+      let(:b_param) do
+        FactoryBot.create(:b_param, creator:, origin: "register_flow", params: {bike: bike_params},
+          created_at: Time.current - BParam::TOKEN_EXPIRATION - 1.day)
+      end
+
+      it "is not unfinished, and isn't in the scope" do
+        expect(b_param.unfinished_registration?).to be_falsey
+        expect(BParam.unfinished_registrations.pluck(:id)).to eq []
+        expect(creator.reload.alert_slugs).to eq []
+      end
+    end
+  end
+
+  describe "email confirmation token" do
+    let(:b_param) { BParam.create(params: {bike: {owner_email: "owner@example.com"}}) }
+
+    let(:user) { FactoryBot.create(:user_confirmed) }
+
+    it "mints a token, reuses it and spends it on confirmation" do
+      token = b_param.generate_email_confirmation_token!
+      expect(token).to be_present
+      expect(b_param.email_confirmation_sent_at).to be_within(2.seconds).of Time.current
+
+      # Resending reuses the token, but re-stamps - the stamp is what rate limits it
+      b_param.update(params: b_param.params.merge("email_confirmation_sent_at" => Time.current - 1.hour))
+      expect(b_param.generate_email_confirmation_token!).to eq token
+      expect(b_param.email_confirmation_sent_at).to be_within(2.seconds).of Time.current
+
+      expect(b_param.confirm_email!(creator_id: user.id)).to be_truthy
+      # Single use - confirming spends the token, so there's nothing left to compare against
+      expect(b_param.reload).to have_attributes(email_confirmed?: true,
+        email_confirmation_token: nil, creator_id: user.id)
+    end
+
+    context "with a creator" do
+      let(:creator) { FactoryBot.create(:user_confirmed) }
+      before { b_param.update(creator_id: creator.id) }
+
+      it "keeps the creator it has" do
+        b_param.confirm_email!(creator_id: user.id)
+        expect(b_param.reload.creator_id).to eq creator.id
+      end
+    end
+
+    context "expired token" do
+      let(:expired_token) { SecurityTokenizer.new_token(Time.current - BParam::TOKEN_EXPIRATION - 1.day) }
+      before do
+        b_param.update(params: b_param.params.merge("email_confirmation_token" => expired_token,
+          "email_confirmation_email" => b_param.owner_email))
+      end
+
+      it "reads as expired, and mints a new token" do
+        expect(b_param.email_confirmation_token_expired?).to be_truthy
+
+        expect(b_param.generate_email_confirmation_token!).to_not eq expired_token
+        expect(b_param.email_confirmation_token_expired?).to be_falsey
+      end
+    end
+
+    context "owner_email edited after the link went out" do
+      let!(:token) { b_param.generate_email_confirmation_token! }
+
+      it "drops the token - it only proves the address it was mailed to" do
+        b_param.clean_params({bike: {owner_email: "someone-else@example.com"}}.as_json)
+        b_param.save!
+        expect(b_param.reload.email_confirmation_token).to be_nil
+
+        # A link for the new address is a new token
+        expect(b_param.generate_email_confirmation_token!).to_not eq token
+      end
+
+      it "keeps the token when only the address's casing changes" do
+        b_param.clean_params({bike: {owner_email: "Owner@Example.com"}}.as_json)
+        b_param.save!
+        expect(b_param.reload.email_confirmation_token).to eq token
       end
     end
   end

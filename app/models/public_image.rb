@@ -61,11 +61,12 @@ class PublicImage < ApplicationRecord
   belongs_to :imageable, polymorphic: true
 
   # Only when a file is assigned, so a legacy carrierwave save pays no attachment query
-  validate :file_permitted, if: -> { attachment_changes["file"].present? }
+  validate :file_permitted, if: :file_attaching?
   attr_writer :image_cache
   attr_accessor :skip_update
 
   before_save :set_calculated_attributes
+  before_save { @file_newly_attached = file_attaching? } # Nothing still says so at after_commit
   after_commit :enqueue_after_commit_jobs
 
   default_scope { where(is_private: false).order(:listing_order) }
@@ -87,12 +88,16 @@ class PublicImage < ApplicationRecord
     imageable.try(:display_name) || imageable.try(:name) || imageable.try(:title)
   end
 
+  # A bike's name is its title_string, which stands alone - everything else names itself
+  # after the source file, which doesn't
+  def image_alt = (bike? ? [name] : [name, imageable_name]).filter_map(&:presence).join(" - ")
+
   def default_name
-    if bike?
-      self.name = "#{imageable&.title_string} #{imageable&.frame_colors&.to_sentence}"
-    elsif image
-      self.name ||= File.basename(image.filename, ".*").titleize
-    end
+    return "#{imageable&.title_string} #{imageable&.frame_colors&.to_sentence}" if bike?
+
+    # The carrierwave uploader is truthy with nothing stored, and its filename is nil then
+    filename = activestorage? ? file.filename : image.filename
+    File.basename(filename.to_s, ".*").titleize
   end
 
   def set_calculated_attributes
@@ -152,7 +157,9 @@ class PublicImage < ApplicationRecord
       return ImageJobs::ExternalUrlStoreJob.perform_async(id)
     end
 
-    ImageJobs::ProcessPublicImageJob.perform_async(id) if file_needs_processing?
+    # Processing takes seconds, and every save in the meantime (reorder, is_private, kind) would
+    # otherwise start a second run racing the first
+    ImageJobs::ProcessPublicImageJob.perform_async(id) if @file_newly_attached && file_needs_processing?
 
     imageable&.update(updated_at: Time.current)
     return true unless bike?
@@ -191,6 +198,8 @@ class PublicImage < ApplicationRecord
   end
 
   private
+
+  def file_attaching? = attachment_changes["file"].present?
 
   # A direct upload declares both, but attaching re-identifies content_type from the stored bytes
   # and byte_size is signed into the presigned PUT - so S3 rejects a body of any other length

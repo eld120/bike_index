@@ -20,8 +20,8 @@ class SamlController < ApplicationController
       content_type: "application/samlmetadata+xml"
   end
 
-  # SP-initiated login: redirect to the IdP with a signed AuthnRequest, remembering the
-  # request id (replay protection) and org slug (cross-tenant binding) for the callback.
+  # SP-initiated login: redirect to the IdP with a signed AuthnRequest, parking the request id
+  # (replay protection) and org slug (cross-tenant binding) in RelayState for the callback.
   def init
     settings = Saml::SettingsBuilder.build(configured_saml_configuration)
     auth_request = OneLogin::RubySaml::Authrequest.new
@@ -33,6 +33,10 @@ class SamlController < ApplicationController
   # Assertion Consumer Service: validate the IdP's response and sign the user in.
   def callback
     saml_configuration = configured_saml_configuration
+    # RelayState is a bearer token, not bound to the browser that began the login, so an attacker
+    # can hand their own token and assertion to a victim and land them in the attacker's account.
+    # Accepted: binding it needs a cookie that survives the IdP's cross-site POST, and that
+    # fragility is what kept SSO login from working at all. No victim account is taken over.
     saml_request = Saml::RequestStore.claim(params[:RelayState])
     return saml_failure("this login has expired, please try again") if saml_request.blank?
     return saml_failure("SAML session mismatch") if saml_request[:org_slug] != params[:org_slug]

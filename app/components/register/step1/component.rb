@@ -4,8 +4,9 @@ module Register
   module Step1
     # Step 1 of the registration flow: the quick-start form
     class Component < ApplicationComponent
-      def initialize(b_param:, current_user: nil)
+      def initialize(b_param:, steps:, current_user: nil)
         @b_param = b_param
+        @steps = steps
         @current_user = current_user
       end
 
@@ -32,11 +33,12 @@ module Register
           org_name: ERB::Util.html_escape(organization.short_name))
       end
 
-      # Discarding the registration shouldn't discard how they arrived - the
-      # organization it's attributed to, or the status they came to report. The
-      # raw status, since BParam#status answers status_with_owner for an unset one
+      # Names this registration rather than leaving it to the session, which another tab
+      # may have moved on. Discarding it shouldn't discard how they arrived - the
+      # organization it's attributed to, or the status they came to report. The raw
+      # status, since BParam#status answers status_with_owner for an unset one
       def start_over_path
-        new_register_path({b_param_token: false, organization_id: organization&.slug,
+        new_register_path({discard_token: @b_param.id_token, organization_id: organization&.slug,
                            status: @b_param.bike["status"]}.compact)
       end
 
@@ -44,11 +46,6 @@ module Register
       # (the same map bikes/new hands its JS as window.cycleTypeTranslations)
       def cycle_type_names
         CycleType.slug_translation_hash_lowercase_short
-      end
-
-      # Only anonymous registrants have anything to wait on
-      def confirmation_email_pending?
-        @current_user.blank?
       end
 
       # Step 1 is only revisitable once submitted, so this is a return from step 2

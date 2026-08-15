@@ -1,25 +1,29 @@
 require "rails_helper"
 
 RSpec.describe RegistrationSequence, type: :model do
-  describe ".template" do
-    it "creates the template, and is idempotent" do
-      expect { RegistrationSequence.template }.to change(RegistrationSequence, :count).by(1)
+  # The template is the sequence no organization owns, so nil is its organization throughout
+  describe ".draft_for(nil) - the template's draft" do
+    it "starts an empty draft - nothing sits above the template to clone" do
+      expect { RegistrationSequence.draft_for(nil) }.to change(RegistrationSequence, :count).by(1)
 
-      template = RegistrationSequence.template
-      expect(template).to be_template
-      expect(template.organization_id).to be_nil
+      template_draft = RegistrationSequence.draft_for(nil)
+      expect(template_draft).to be_template
+      expect(template_draft).to be_draft
+      expect(template_draft.registration_sequence_pages).to be_empty
 
-      expect { RegistrationSequence.template }.to_not change(RegistrationSequence, :count)
+      expect { RegistrationSequence.draft_for(nil) }.to_not change(RegistrationSequence, :count)
     end
 
-    context "when a concurrent request wins the create race" do
-      it "rescues RecordNotUnique and returns the existing template" do
-        existing = FactoryBot.create(:registration_sequence_template)
-        templates = RegistrationSequence.templates
-        allow(RegistrationSequence).to receive(:templates).and_return(templates)
-        allow(templates).to receive(:first_or_create!).and_raise(ActiveRecord::RecordNotUnique)
+    context "with a live template" do
+      let!(:active) { FactoryBot.create(:registration_sequence_template_active, :with_pages) }
 
-        expect(RegistrationSequence.template).to eq(existing)
+      it "clones the live template, and .active_template stays the live one" do
+        template_draft = RegistrationSequence.draft_for(nil)
+
+        expect(template_draft).to be_template
+        expect(template_draft).to be_draft
+        expect(template_draft.registration_sequence_pages.count).to eq 2
+        expect(RegistrationSequence.active_template).to eq active
       end
     end
   end
@@ -27,24 +31,36 @@ RSpec.describe RegistrationSequence, type: :model do
   describe ".draft_for" do
     let(:organization) { FactoryBot.create(:organization) }
 
-    it "builds a draft cloning the template pages" do
-      template = RegistrationSequence.template
-      template.registration_sequence_pages.create!(title: "Battery", subtitle: "Charge safely", body: "<p>Hello</p>", listing_order: 0)
+    it "builds a draft cloning the live template's pages and acknowledgment settings" do
+      template = FactoryBot.create(:registration_sequence_template, faq_url: "https://example.com/faq",
+        acknowledgment_text: "agree to everything")
+      template.registration_sequence_pages.create!(title: "Battery", subtitle: "Charge safely",
+        heading: "Looks like you have an e-vehicle!", body: "<p>Hello</p>", listing_order: 0,
+        organization_specific: true)
+      template.make_active!
 
       draft = RegistrationSequence.draft_for(organization)
 
       expect(draft).to be_draft
-      expect(draft.organization).to eq(organization)
+      expect(draft).to have_attributes(organization:, faq_url: "https://example.com/faq",
+        acknowledgment: "agree to everything")
       page = draft.registration_sequence_pages.first
-      expect(page.title).to eq("Battery")
-      expect(page.subtitle).to eq("Charge safely")
-      expect(page.body).to eq("<p>Hello</p>")
+      expect(page).to have_attributes(title: "Battery", subtitle: "Charge safely",
+        heading: "Looks like you have an e-vehicle!", body: "<p>Hello</p>",
+        organization_specific: true)
+    end
+
+    it "falls back to the default acknowledgment when there's no live template" do
+      expect(RegistrationSequence.draft_for(organization).acknowledgment)
+        .to eq RegistrationSequence::DEFAULT_ACKNOWLEDGMENT_TEXT
     end
 
     it "duplicates template page images into independent blobs" do
-      template = RegistrationSequence.template
-      template_page = template.registration_sequence_pages.create!(title: "Battery", listing_order: 0)
+      template = FactoryBot.create(:registration_sequence_template)
+      template_page = template.registration_sequence_pages.create!(title: "Battery", listing_order: 0,
+        body: "<ul><li>Charge safely</li></ul>")
       template_page.image.attach(io: StringIO.new("fake image"), filename: "battery.jpg", content_type: "image/jpeg")
+      template.make_active!
 
       page = RegistrationSequence.draft_for(organization).registration_sequence_pages.first
 
@@ -53,6 +69,26 @@ RSpec.describe RegistrationSequence, type: :model do
       expect(page.image.blob.id).to_not eq(template_page.image.blob.id)
       expect(page.image.download).to eq("fake image")
       expect(page.image.filename.to_s).to eq("battery.jpg")
+    end
+
+    context "with an active sequence" do
+      let!(:active) do
+        FactoryBot.create(:registration_sequence_active, :with_pages, organization:, faq_url: "https://example.com/live")
+      end
+
+      it "clones the live sequence, not the template" do
+        template = FactoryBot.create(:registration_sequence_template)
+        template.registration_sequence_pages.create!(title: "Template only",
+          body: "<ul><li>from template</li></ul>", listing_order: 0)
+        template.make_active!
+
+        draft = RegistrationSequence.draft_for(organization)
+
+        expect(draft.faq_url).to eq "https://example.com/live"
+        expect(draft.registration_sequence_pages.pluck(:title))
+          .to eq(active.registration_sequence_pages.pluck(:title))
+        expect(draft.registration_sequence_pages.pluck(:title)).to_not include("Template only")
+      end
     end
 
     context "with an existing draft" do
@@ -75,6 +111,95 @@ RSpec.describe RegistrationSequence, type: :model do
 
         expect(RegistrationSequence.draft_for(organization)).to eq(existing)
       end
+    end
+  end
+
+  describe "immutability once activated" do
+    let(:organization) { FactoryBot.create(:organization) }
+    let!(:sequence) { FactoryBot.create(:registration_sequence, :with_pages, organization:) }
+    let(:page) { sequence.registration_sequence_pages.first }
+
+    it "is editable as a draft, frozen once active, and archivable after" do
+      expect(sequence.update(acknowledgment_text: "still a draft")).to be_truthy
+      expect(page.update(title: "still a draft")).to be_truthy
+      expect(sequence.reorder_page!(page, 1)).to_not eq false
+
+      expect(sequence.make_active!).to be_truthy
+
+      # An acknowledgment points at these by id, so they can't move under it
+      expect(sequence.reload.update(acknowledgment_text: "changed")).to be_falsey
+      expect(sequence.errors.full_messages.to_sentence).to match(/can't be edited/)
+      expect(sequence.reload.acknowledgment_text).to eq "still a draft"
+
+      expect(page.reload.update(title: "changed")).to be_falsey
+      expect(page.reload.title).to eq "still a draft"
+      expect(page.destroy).to be_falsey
+      # update_all skips callbacks, so reorder guards itself
+      expect(sequence.reorder_page!(page, 1)).to eq false
+
+      # Adding a page would rewrite what past registrants agreed to
+      expect(RegistrationSequencePage.create(registration_sequence: sequence, title: "Added later"))
+        .to_not be_persisted
+
+      # Archiving is the one change activation still allows
+      expect(sequence.reload.update(end_at: Time.current)).to be_truthy
+      expect(sequence.reload).to be_archived
+    end
+
+    it "allows a sequence created together with its pages - nothing can have acknowledged it yet" do
+      born_active = FactoryBot.create(:registration_sequence_active, :with_pages,
+        organization: FactoryBot.create(:organization))
+
+      expect(born_active).to be_active
+      expect(born_active.registration_sequence_pages.count).to eq 2
+    end
+
+    it "is soft-deleted with its organization, keeping its pages readable" do
+      sequence.make_active!
+
+      expect { organization.destroy }.to_not change(RegistrationSequencePage, :count)
+      # Out of the live scope, but still there for the acknowledgments that reference it
+      expect(RegistrationSequence.find_by(id: sequence.id)).to be_nil
+      deleted = RegistrationSequence.with_deleted.find(sequence.id)
+      expect(deleted.deleted_at).to be_present
+      expect(deleted.registration_sequence_pages.count).to eq 2
+    end
+  end
+
+  describe "the template's lifecycle" do
+    let!(:template_draft) { FactoryBot.create(:registration_sequence_template, :with_pages) }
+
+    it "activates, freezes, and is superseded by the next draft" do
+      expect(template_draft.display_name).to eq "Template Draft"
+      expect(RegistrationSequence.active_template).to be_nil
+
+      expect(template_draft.make_active!).to be_truthy
+      expect(template_draft.reload).to be_active
+      expect(template_draft.display_name).to eq "Template Current"
+      expect(RegistrationSequence.active_template).to eq template_draft
+
+      # Frozen like any live sequence - editing means a new draft
+      expect(template_draft.update(faq_url: "https://example.com/faq")).to be_falsey
+
+      replacement = RegistrationSequence.draft_for(nil)
+      expect(replacement.id).to_not eq template_draft.id
+      expect(replacement.make_active!).to be_truthy
+
+      expect(template_draft.reload).to be_archived
+      expect(RegistrationSequence.active_template).to eq replacement
+      expect(RegistrationSequence.templates.active.count).to eq 1
+    end
+
+    it "permits only one template draft" do
+      expect { FactoryBot.create(:registration_sequence_template) }
+        .to raise_error(ActiveRecord::RecordNotUnique)
+    end
+
+    it "permits only one live template" do
+      template_draft.make_active!
+
+      expect { FactoryBot.create(:registration_sequence_template_active) }
+        .to raise_error(ActiveRecord::RecordNotUnique)
     end
   end
 
@@ -101,6 +226,34 @@ RSpec.describe RegistrationSequence, type: :model do
         expect(draft.reload).to be_draft
         expect(active.reload).to be_active
       end
+    end
+
+    context "draft with an incomplete page" do
+      it "does not become active" do
+        # update_column bypasses validation, the way legacy data could
+        draft.registration_sequence_pages.first.update_column(:body, "")
+        expect(draft.make_active!).to be_falsey
+        expect(draft.reload).to be_draft
+      end
+    end
+  end
+
+  describe "#discard_draft!" do
+    let(:organization) { FactoryBot.create(:organization) }
+
+    it "removes the draft and its pages" do
+      draft = FactoryBot.create(:registration_sequence, :with_pages, organization:)
+
+      expect { expect(draft.discard_draft!).to be_truthy }
+        .to change(RegistrationSequence, :count).by(-1)
+        .and change(RegistrationSequencePage, :count).by(-2)
+      expect(RegistrationSequence.with_deleted.find_by(id: draft.id)).to be_nil
+    end
+
+    it "refuses to discard an activated sequence" do
+      active = FactoryBot.create(:registration_sequence_active, :with_pages, organization:)
+      expect(active.discard_draft!).to eq false
+      expect(active.reload).to be_active
     end
   end
 

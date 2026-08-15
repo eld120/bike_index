@@ -89,7 +89,7 @@ module OrganizedHelper
     when "resolved_otherwise", "on_deck", /approved/, /retrieved/, "bike graduated", /certified_by/
       "text-info"
     when /removed/, "impounded", "trashed", "failed_to_find", /denied/, "delivery failure"
-      UI::Alert::Component::TEXT_CLASSES[:error]
+      UI::Alerts::Base::Component::TEXT_CLASSES[:error]
     else
       "less-strong"
     end
@@ -119,42 +119,6 @@ module OrganizedHelper
 
       bike_url(obj.bike.to_param, graduated_notification_remaining: obj.marked_remaining_link_token)
     end
-  end
-
-  def include_field_reg_extra_registration_number?(organization = nil, user = nil)
-    organization.present? &&
-      organization.additional_registration_fields.include?("reg_extra_registration_number")
-  end
-
-  def include_field_reg_organization_affiliation?(organization = nil, user = nil)
-    return false unless organization.present? &&
-      organization.additional_registration_fields.include?("reg_organization_affiliation")
-    return true if user.blank?
-
-    user.user_registration_organizations.with_organization_affiliation(organization.id).none?
-  end
-
-  def include_field_reg_phone?(organization = nil, user = nil)
-    return false unless organization.present? &&
-      organization.additional_registration_fields.include?("reg_phone")
-
-    !user&.phone&.present?
-  end
-
-  def include_field_reg_bike_sticker?(organization = nil, user = nil, require_user_editable = false)
-    reg_field = organization.present? &&
-      organization.additional_registration_fields.include?("reg_bike_sticker")
-    return reg_field unless reg_field && require_user_editable
-
-    organization.enabled?("bike_stickers_user_editable")
-  end
-
-  def include_field_reg_student_id?(organization = nil, user = nil)
-    return false unless organization.present? &&
-      organization.additional_registration_fields.include?("reg_student_id")
-    return true if user.blank?
-
-    user.user_registration_organizations.with_student_id(organization.id).none?
   end
 
   def registration_field_label(organization = nil, field_slug = nil, strip_tags: false)

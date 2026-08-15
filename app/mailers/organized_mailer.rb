@@ -9,18 +9,18 @@ class OrganizedMailer < ApplicationMailer
   helper :money # Required to render currency for bike recoveries
   helper :bike
 
-  def partial_registration(b_param)
-    @organization = b_param.creation_organization
-    component = Emails::PartialRegistration::Component.new(b_param:)
+  # What a registration is reporting, in the word the subject line uses for it -
+  # status_impounded is what "Found/Abandoned" registers as
+  CONFIRMATION_REPORTS = {"status_stolen" => "stolen", "status_abandoned" => "abandoned",
+                          "status_impounded" => "found"}.freeze
 
-    I18n.with_locale(@user&.preferred_language) do
-      mail(
-        reply_to: reply_to,
-        to: b_param.owner_email,
-        subject: default_i18n_subject(default_subject_vars),
-        tag: __callee__
-      ) { |format| format.html { render component } }
-    end
+  def partial_registration(b_param)
+    b_param_mail(b_param, Emails::PartialRegistration::Component.new(b_param:), tag: __callee__)
+  end
+
+  def partial_register_confirmation(b_param)
+    b_param_mail(b_param, Emails::PartialRegisterConfirmation::Component.new(b_param:), tag: __callee__,
+      subject_key: confirmation_subject_key(b_param))
   end
 
   def finished_registration(ownership)
@@ -122,6 +122,23 @@ class OrganizedMailer < ApplicationMailer
   end
 
   private
+
+  # Addressed to whoever entered the registration, and subjected by the caller's own name
+  def b_param_mail(b_param, component, tag:, subject_key: tag)
+    @organization = b_param.creation_organization
+    mail(reply_to: reply_to,
+      to: b_param.owner_email,
+      subject: I18n.t("organized_mailer.#{subject_key}.subject",
+        **default_subject_vars, cycle_type: b_param.type),
+      tag:) { |format| format.html { render component } }
+  end
+
+  # A registration that reports something says what, rather than asking for an email
+  # confirmation - clicking the link is what finishes the report
+  def confirmation_subject_key(b_param)
+    report = CONFIRMATION_REPORTS[b_param.status]
+    ["partial_register_confirmation", report].compact.join("_")
+  end
 
   def finished_registration_type(bike, ownership)
     return "_stolen" if bike.status_stolen?

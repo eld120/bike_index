@@ -533,6 +533,19 @@ RSpec.describe User, type: :model do
     end
   end
 
+  describe "generate_username" do
+    it "returns a username CredibilityScorer doesn't penalize" do
+      expect(CredibilityScorer.suspiscious_handle?(User.generate_username)).to be_falsey
+    end
+    context "random username contains a bad word" do
+      # BadWordCleaner matches substrings, so a random username occasionally does
+      before { allow(SecureRandom).to receive(:urlsafe_base64).and_return("Xcumbersome7", "Zpolitely3") }
+      it "draws again" do
+        expect(User.generate_username).to eq "zpolitely3"
+      end
+    end
+  end
+
   describe "access_tokens_for_application" do
     it "returns [] if no application" do
       user = User.new
@@ -573,8 +586,8 @@ RSpec.describe User, type: :model do
       end
       it "input time" do
         user = FactoryBot.create(:user)
-        user.update_auth_token("token_for_password_reset", (Time.current - 121.minutes).to_i)
-        expect(user.reload.auth_token_time("token_for_password_reset")).to be < (Time.current - 1.hours)
+        user.update_auth_token("token_for_password_reset", (User::AUTH_TOKEN_EXPIRY + 1.minute).ago.to_i)
+        expect(user.reload.auth_token_time("token_for_password_reset")).to be < (Time.current - User::AUTH_TOKEN_EXPIRY)
         expect(user.auth_token_expired?("token_for_password_reset")).to be_truthy
       end
     end
@@ -590,12 +603,14 @@ RSpec.describe User, type: :model do
         expect(user.auth_token_time("magic_link_token")).to be > Time.current - 2.seconds
         expect(user.auth_token_expired?("magic_link_token")).to be_falsey
       end
-      it "uses input time, it returns the token" do
+      it "uses input time, and expires once past the window" do
         user = FactoryBot.create(:user)
-        user.update_auth_token("magic_link_token", (Time.current - 1.hour).to_i)
-        user.reload
-        expect(user.auth_token_time("magic_link_token")).to be < (Time.current - 1.hours)
+        user.update_auth_token("magic_link_token", 1.minute.ago.to_i)
+        expect(user.reload.auth_token_time("magic_link_token")).to be_within(1.second).of(1.minute.ago)
         expect(user.auth_token_expired?("magic_link_token")).to be_falsey
+
+        user.update_auth_token("magic_link_token", (User::AUTH_TOKEN_EXPIRY + 1.minute).ago.to_i)
+        expect(user.reload.auth_token_expired?("magic_link_token")).to be_truthy
       end
     end
   end
@@ -653,7 +668,7 @@ RSpec.describe User, type: :model do
       token = user.refreshed_magic_link_token
       expect(token).to be_present
       expect(user.refreshed_magic_link_token).to eq token
-      user.update_auth_token("magic_link_token", (Time.current - 3.hours).to_i)
+      user.update_auth_token("magic_link_token", (User::AUTH_TOKEN_EXPIRY + 1.minute).ago.to_i)
       expect(user.refreshed_magic_link_token).to_not eq token
     end
   end

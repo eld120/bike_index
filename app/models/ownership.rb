@@ -70,7 +70,7 @@ class Ownership < ApplicationRecord
   enum :pos_kind, Organization::POS_KIND_ENUM
   enum :origin, ORIGIN_ENUM
 
-  belongs_to :bike
+  belongs_to :bike, touch: true
   belongs_to :user
   belongs_to :creator, class_name: "User"
   belongs_to :impound_record
@@ -341,7 +341,7 @@ class Ownership < ApplicationRecord
     # skip cleaning if it's blank
     return {} if r_info.blank?
 
-    # The only place user_name comes from, other than a user setting it themselves, is bulk_import
+    # user_name comes from bulk_import and the register flow, or a user setting it themselves
     r_info["phone"] = Phonifyer.phonify(r_info["phone"])
     # bike_code should be renamed bike_sticker. Legacy ownership issue
     if r_info["bike_code"].present?

@@ -229,6 +229,18 @@ RSpec.describe "BikesController#create", type: :request do
       end
     end
   end
+  context "invalid frame_material" do
+    # Form filling bots submit "1" for every field - the enum assignment used to raise
+    let(:bike_params) { basic_bike_params.merge(frame_material: "1") }
+    it "renders the error" do
+      expect {
+        post base_url, params: {bike: bike_params}
+      }.to change(Bike, :count).by(0)
+      b_param = BParam.last
+      expect(b_param.bike_errors).to eq(["Frame material is not valid"])
+      expect(response).to redirect_to(new_bike_url(b_param_token: b_param.id_token))
+    end
+  end
   context "no existing b_param, impounded" do
     let(:bike_params) { basic_bike_params }
     context "impound_record" do
@@ -498,6 +510,28 @@ RSpec.describe "BikesController#create", type: :request do
         expect(new_bike).to have_attributes(cycle_type: "bike", propulsion_type: "pedal-assist")
         expect(new_bike.motorized?).to be_truthy
         expect(new_bike.current_ownership.origin).to eq "embed"
+      end
+    end
+    context "with a photo" do
+      let(:blob) do
+        ActiveStorage::Blob.create_and_upload!(io: File.open(Rails.root.join("spec/fixtures/bike.jpg")),
+          filename: "bike.jpg", content_type: "image/jpeg")
+      end
+
+      it "stores the direct upload's signed id, and keeps it when a resubmission posts none" do
+        expect {
+          post base_url, params: {bike: bike_params.merge(image_signed_id: blob.signed_id, primary_frame_color_id: "")}
+        }.to_not change(Bike, :count)
+        expect(flash[:error]).to be_present
+        expect(b_param.reload.image_signed_id).to eq blob.signed_id
+        # It isn't a bike attribute, so it stays out of the bike params
+        expect(b_param.bike.keys).to_not include "image_signed_id"
+
+        # Blank is what the field posts when the browser hasn't uploaded anything this time
+        expect {
+          post base_url, params: {bike: bike_params.merge(image_signed_id: "")}
+        }.to change(Bike, :count).by(1)
+        expect(b_param.reload.image_signed_id).to eq blob.signed_id
       end
     end
     context "no organization" do

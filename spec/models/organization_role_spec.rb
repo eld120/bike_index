@@ -44,6 +44,39 @@ RSpec.describe OrganizationRole, type: :model do
     end
   end
 
+  describe ".create_for_user_email_domain" do
+    let(:invited_email) { "student@sso.edu" }
+    let(:organization) { FactoryBot.create(:organization) }
+    let!(:user) { FactoryBot.create(:user_confirmed, email: invited_email) }
+    let(:create_for_user_email_domain) { OrganizationRole.create_for_user_email_domain(organization_id: organization.id, invited_email:) }
+
+    it "grants the existing user the default member role" do
+      expect(create_for_user_email_domain.organization_id).to eq organization.id
+      expect(create_for_user_email_domain.role).to eq "member"
+      expect(create_for_user_email_domain.user).to eq user
+    end
+
+    it "returns the existing role rather than a second one" do
+      existing = create_for_user_email_domain
+      expect {
+        expect(OrganizationRole.create_for_user_email_domain(organization_id: organization.id, invited_email: "Student@SSO.edu "))
+          .to eq existing
+      }.to_not change(OrganizationRole, :count)
+    end
+
+    context "invited to a different organization" do
+      let!(:other_organization_role) do
+        FactoryBot.create(:organization_role, invited_email:,
+          organization: FactoryBot.create(:organization))
+      end
+
+      it "creates the role for this organization anyway" do
+        expect(create_for_user_email_domain.organization_id).to eq organization.id
+        expect(create_for_user_email_domain.id).to_not eq other_organization_role.id
+      end
+    end
+  end
+
   describe "admin?" do
     context "admin" do
       it "returns true" do
